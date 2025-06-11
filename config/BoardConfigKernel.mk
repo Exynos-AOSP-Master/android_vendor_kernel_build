@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2023 The LineageOS Project
+# Copyright (C) 2018-2024 The LineageOS Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,7 +30,10 @@
 #   TARGET_KERNEL_CLANG_VERSION        = Clang prebuilts version, optional, defaults to clang-stable
 #   TARGET_KERNEL_CLANG_PATH           = Clang prebuilts path, optional
 #
+#   TARGET_KERNEL_LIBC_SYSROOT_USE     = libc sysroot to use, defaults to "host" for 6.11+
+#
 #   TARGET_KERNEL_LLVM_BINUTILS        = Use LLVM binutils, defaults to true
+#   TARGET_KERNEL_RUST_VERSION         = Rust prebuilts version, optional
 #   TARGET_KERNEL_NO_GCC               = Fully compile the kernel without GCC.
 #                                        Defaults to false
 #   TARGET_KERNEL_VERSION              = Reported kernel version in top level kernel
@@ -75,10 +78,25 @@ TARGET_KERNEL_VERSION ?= $(shell echo $(KERNEL_VERSION)"."$(KERNEL_PATCHLEVEL))
 
 # 5.10+ can fully compile without GCC by default
 ifneq ($(KERNEL_VERSION),)
-    ifeq ($(shell expr $(KERNEL_VERSION) \>= 5), 1)
+    ifeq ($(shell expr $(KERNEL_VERSION) \>= 6), 1)
+        TARGET_KERNEL_NO_GCC ?= true
+    else ifeq ($(shell expr $(KERNEL_VERSION) \>= 5), 1)
         ifeq ($(shell expr $(KERNEL_PATCHLEVEL) \>= 10), 1)
             TARGET_KERNEL_NO_GCC ?= true
         endif
+    endif
+endif
+
+# 6.11+ can no longer use aosp glibc sysroot headers (too old)
+ifneq ($(KERNEL_VERSION),)
+    ifeq ($(shell expr $(KERNEL_VERSION) \< 6), 1)
+        # empty
+    else ifeq ($(KERNEL_VERSION), 6)
+        ifeq ($(shell expr $(KERNEL_PATCHLEVEL) \>= 11), 1)
+            TARGET_KERNEL_LIBC_SYSROOT_USE ?= host
+        endif
+    else
+        TARGET_KERNEL_LIBC_SYSROOT_USE ?= host
     endif
 endif
 
@@ -95,6 +113,8 @@ else
 endif
 TARGET_KERNEL_CLANG_PATH ?= $(BUILD_TOP)/prebuilts/clang/host/$(HOST_PREBUILT_TAG)/$(KERNEL_CLANG_VERSION)
 
+TARGET_KERNEL_RUST_VERSION ?= 1.73.0c
+
 ifneq ($(USE_CCACHE),)
     ifneq ($(CCACHE_EXEC),)
         # Android 10+ deprecates use of a build ccache. Only system installed ones are now allowed
@@ -109,7 +129,7 @@ KERNEL_MAKE_FLAGS :=
 KERNEL_MAKE_FLAGS += -j$(shell getconf _NPROCESSORS_ONLN)
 
 TOOLS_PATH_OVERRIDE := \
-    PERL5LIB=$(BUILD_TOP)/prebuilts/tools-lineage/common/perl-base
+    HIP_PATH=none PERL5LIB=$(BUILD_TOP)/prebuilts/tools-lineage/common/perl-base
 
 ifneq ($(KERNEL_NO_GCC), true)
     GCC_PREBUILTS := $(BUILD_TOP)/prebuilts/gcc/$(HOST_PREBUILT_TAG)
@@ -165,7 +185,7 @@ ifneq ($(KERNEL_NO_GCC), true)
         endif
     endif
 
-    KERNEL_MAKE_FLAGS += CPATH="/usr/include:/usr/include/x86_64-linux-gnu" HOSTLDFLAGS="-L/usr/lib/x86_64-linux-gnu -L/usr/lib64 -fuse-ld=lld"
+    KERNEL_MAKE_FLAGS += HOSTCFLAGS="-I/usr/include -I/usr/include/x86_64-linux-gnu" HOSTLDFLAGS="-L/usr/lib/x86_64-linux-gnu -L/usr/lib64 -fuse-ld=lld"
 
     ifeq ($(KERNEL_ARCH),arm64)
         # Add 32-bit GCC to PATH so that arm-linux-androidkernel-as is available for CONFIG_COMPAT_VDSO
@@ -184,10 +204,16 @@ ifneq ($(KERNEL_NO_GCC), true)
         endif
     endif
 else
-    KERNEL_MAKE_FLAGS += HOSTCFLAGS="--sysroot=$(BUILD_TOP)/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8/sysroot -I$(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/include"
-    KERNEL_MAKE_FLAGS += HOSTLDFLAGS="--sysroot=$(BUILD_TOP)/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8/sysroot -Wl,-rpath,$(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/lib64 -L $(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt"
+    ifeq ($(TARGET_KERNEL_LIBC_SYSROOT_USE), host)
+        KERNEL_HOST_C_LD_FLAGS_SYSROOT :=
+    else
+        KERNEL_HOST_C_LD_FLAGS_SYSROOT := --sysroot=$(BUILD_TOP)/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8/sysroot
+    endif
 
-    TOOLS_PATH_OVERRIDE += PATH=$(BUILD_TOP)/prebuilts/tools-lineage/$(HOST_PREBUILT_TAG)/bin:$(TARGET_KERNEL_CLANG_PATH)/bin:$$PATH
+    KERNEL_MAKE_FLAGS += HOSTCFLAGS="$(KERNEL_HOST_C_LD_FLAGS_SYSROOT) -I$(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/include"
+    KERNEL_MAKE_FLAGS += HOSTLDFLAGS="$(KERNEL_HOST_C_LD_FLAGS_SYSROOT) -Wl,-rpath,$(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/lib64 -L $(BUILD_TOP)/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt"
+
+    TOOLS_PATH_OVERRIDE += PATH=$(BUILD_TOP)/prebuilts/tools-lineage/$(HOST_PREBUILT_TAG)/bin:$(TARGET_KERNEL_CLANG_PATH)/bin:$(BUILD_TOP)/prebuilts/rust/$(HOST_PREBUILT_TAG)/$(TARGET_KERNEL_RUST_VERSION)/bin:$(BUILD_TOP)/prebuilts/clang-tools/$(HOST_PREBUILT_TAG)/bin:$$PATH
 endif
 
 # Set DTBO image locations so the build system knows to build them
